@@ -1,4 +1,4 @@
-# foundry-model-key-sharing Context
+# foundry-based-cost-governance Context
 
 This context defines the durable language for Azure AI Foundry 팀별 키 공유 및 사용량 모니터링 샘플.
 

@@ -1,4 +1,4 @@
-# foundry-model-key-sharing
+# foundry-based-cost-governance
 
 Azure AI Foundry 팀별 키 공유 및 사용량 모니터링 샘플
 
