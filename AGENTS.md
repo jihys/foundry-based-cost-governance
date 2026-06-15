@@ -6,7 +6,7 @@ Azure AI Foundry 팀별 키 공유 및 사용량 모니터링 샘플
 
 - **Language**: Python 3.11+
 - **Framework**: Azure SDK (`azure-ai-projects`, `azure-identity`, `azure-mgmt-cognitiveservices`)
-- **Infra**: Bicep (Azure AI Foundry, RBAC, Budget Alerts)
+- **Infra**: Terraform (Azure AI Foundry, RBAC, Budget Alerts)
 - **Test**: pytest
 - **Docs**: Markdown
 
@@ -19,7 +19,7 @@ src/                    # 메인 소스 코드
 ├── sharing/            # 리소스 공유 로직
 └── utils/              # 공통 유틸리티
 tests/                  # 테스트
-infra/                  # Bicep IaC
+infra/                  # Terraform IaC
 notebooks/              # 샘플 노트북
 docs/                   # 문서
 ```

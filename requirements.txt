@@ -5,3 +5,6 @@ azure-mgmt-monitor>=6.0.0
 azure-mgmt-costmanagement>=4.0.0
 python-dotenv>=1.0.0
 rich>=13.0.0
+openpyxl>=3.1.0
+requests>=2.31.0
+pytest>=8.0.0
