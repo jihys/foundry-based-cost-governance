@@ -16,6 +16,8 @@ locals {
     for team, ws_id in var.team_workspaces :
     "workspace('${ws_id}').AzureDiagnostics"
   ])
+
+  workspace_ids = values(var.team_workspaces)
 }
 
 # -----------------------------------------------------------------------------
@@ -36,7 +38,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
   location            = var.location
   resource_group_name = azurerm_resource_group.unified.name
   display_name        = "Unified Cost Dashboard - All Teams"
-  source_id           = "azure monitor"
+  source_id           = lower(values(var.team_workspaces)[0])
 
   data_json = jsonencode({
     version = "Notebook/1.0"
@@ -82,6 +84,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           timeContext   = { durationMs = 2592000000 }
           queryType     = 0
           resourceType  = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = local.workspace_ids
           visualization = "barchart"
           chartSettings = {
             xAxis     = "TimeGenerated"
@@ -123,6 +126,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           timeContext   = { durationMs = 2592000000 }
           queryType     = 0
           resourceType  = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = local.workspace_ids
           visualization = "table"
         }
         name = "token-summary-by-model"
@@ -164,6 +168,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           timeContext   = { durationMs = 2592000000 }
           queryType     = 0
           resourceType  = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = local.workspace_ids
           visualization = "linechart"
           chartSettings = {
             xAxis = "TimeGenerated"
@@ -197,6 +202,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           timeContext   = { durationMs = 2592000000 }
           queryType     = 0
           resourceType  = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = local.workspace_ids
           visualization = "barchart"
           chartSettings = {
             xAxis     = "TimeGenerated"
@@ -256,6 +262,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           timeContext   = { durationMs = 2592000000 }
           queryType     = 0
           resourceType  = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = local.workspace_ids
           visualization = "table"
           gridSettings = {
             sortBy = [{ itemKey = "EstimatedCostUSD", sortOrder = 2 }]

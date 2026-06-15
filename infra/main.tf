@@ -216,6 +216,7 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           timeContext   = { durationMs = 2592000000 }
           queryType     = 0
           resourceType  = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
           visualization = "barchart"
           chartSettings = {
             xAxis = "TimeGenerated"
@@ -250,6 +251,7 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           timeContext   = { durationMs = 2592000000 }
           queryType     = 0
           resourceType  = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
           visualization = "table"
         }
         name = "token-summary-by-model"
@@ -285,6 +287,7 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           timeContext   = { durationMs = 2592000000 }
           queryType     = 0
           resourceType  = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
           visualization = "linechart"
           chartSettings = {
             xAxis = "TimeGenerated"
@@ -311,6 +314,7 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           timeContext   = { durationMs = 2592000000 }
           queryType     = 0
           resourceType  = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
           visualization = "barchart"
           chartSettings = {
             xAxis = "TimeGenerated"
