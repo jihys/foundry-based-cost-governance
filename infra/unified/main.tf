@@ -17,6 +17,11 @@ locals {
     "workspace('${ws_id}').AzureDiagnostics"
   ])
 
+  workspace_metrics_union = join(",\n  ", [
+    for team, ws_id in var.team_workspaces :
+    "workspace('${ws_id}').AzureMetrics"
+  ])
+
   workspace_ids = values(var.team_workspaces)
 }
 
@@ -43,36 +48,37 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
   data_json = jsonencode({
     version = "Notebook/1.0"
     items = [
-      # -----------------------------------------------------------------------
+      # ---------------------------------------------------------------------
       # Header
-      # -----------------------------------------------------------------------
+      # ---------------------------------------------------------------------
       {
         type = 1
         content = {
-          json = "# Unified Cost Dashboard — All Teams\nCross-team request activity and performance monitoring for Azure AI Services.\n\nTeams: ${join(", ", keys(var.team_workspaces))}"
+          json = "# Unified Cost Dashboard — All Teams\n팀별 AI 모델 토큰 사용량 및 비용 모니터링\n\nTeams: ${join(", ", keys(var.team_workspaces))}"
         }
         name = "header"
       },
-      # -----------------------------------------------------------------------
-      # Panel 1: Token Usage Daily (bar chart)
-      # -----------------------------------------------------------------------
+      # ---------------------------------------------------------------------
+      # Panel 1: 팀별 일별 토큰 사용량 (bar chart)
+      # ---------------------------------------------------------------------
       {
         type = 3
         content = {
           version                 = "KqlItem/1.0"
           query                   = <<-KQL
-            let all_data = union
+            let all_metrics = union
+              ${local.workspace_metrics_union};
+            let all_logs = union
               ${local.workspace_union};
-            all_data
+            let tokens = all_metrics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where MetricName in ("InputTokens", "OutputTokens")
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
-            | extend model_name = tostring(parse_json(properties_s).modelName)
             | summarize
-                RequestCount = count(),
-                AvgDurationMs = round(avg(DurationMs), 1),
-                TotalResponseBytes = sum(toint(parse_json(properties_s).responseLength))
-              by bin(TimeGenerated, 1d), model_name, team_name
+                InputTokens = sumif(Total, MetricName == "InputTokens"),
+                OutputTokens = sumif(Total, MetricName == "OutputTokens")
+              by bin(TimeGenerated, 1d), team_name;
+            tokens
             | order by TimeGenerated desc
           KQL
           size                    = 0
@@ -82,38 +88,50 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           crossComponentResources = local.workspace_ids
           visualization           = "barchart"
           chartSettings = {
-            xAxis             = "TimeGenerated"
-            yAxis             = ["RequestCount"]
-            group             = "model_name"
-            seriesLabelFormat = "{model_name} ({team_name})"
+            xAxis = "TimeGenerated"
+            yAxis = ["InputTokens", "OutputTokens"]
+            group = "team_name"
           }
         }
-        name = "request-activity-daily"
+        name = "token-usage-daily"
       },
-      # -----------------------------------------------------------------------
-      # Panel 2: Token Summary by Model (table)
-      # -----------------------------------------------------------------------
+      # ---------------------------------------------------------------------
+      # Panel 2: 팀별 모델 사용량 (table)
+      # ---------------------------------------------------------------------
       {
         type = 3
         content = {
           version                 = "KqlItem/1.0"
           query                   = <<-KQL
-            let all_data = union
+            let all_metrics = union
+              ${local.workspace_metrics_union};
+            let all_logs = union
               ${local.workspace_union};
-            all_data
+            let model_reqs = all_logs
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
-            | extend req_len = toint(parse_json(properties_s).requestLength)
-            | extend resp_len = toint(parse_json(properties_s).responseLength)
+            | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
+            | summarize Requests = count(), TotalRespBytes = sum(resp_bytes), AvgDurationMs = round(avg(DurationMs), 1) by team_name, model_name;
+            let team_total_resp = model_reqs | summarize TeamTotalResp = sum(TotalRespBytes) by team_name;
+            let team_tokens = all_metrics
+            | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
+            | where MetricName in ("InputTokens", "OutputTokens")
+            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | summarize
-                TotalRequests = count(),
-                AvgDurationMs = round(avg(DurationMs), 1),
-                TotalRequestBytes = sum(req_len),
-                TotalResponseBytes = sum(resp_len)
-              by model_name, team_name
-            | order by TotalRequests desc
+                TeamInputTokens = sumif(Total, MetricName == "InputTokens"),
+                TeamOutputTokens = sumif(Total, MetricName == "OutputTokens")
+              by team_name;
+            model_reqs
+            | join kind=inner team_total_resp on team_name
+            | join kind=inner team_tokens on team_name
+            | extend Weight = iff(TeamTotalResp > 0, TotalRespBytes / TeamTotalResp, 0.0)
+            | extend InputTokens = round(TeamInputTokens * Weight)
+            | extend OutputTokens = round(TeamOutputTokens * Weight)
+            | extend TotalTokens = InputTokens + OutputTokens
+            | project team_name, model_name, Requests, InputTokens, OutputTokens, TotalTokens, AvgDurationMs
+            | order by team_name asc, TotalTokens desc
           KQL
           size                    = 0
           timeContext             = { durationMs = 2592000000 }
@@ -122,28 +140,52 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           crossComponentResources = local.workspace_ids
           visualization           = "table"
         }
-        name = "model-summary"
+        name = "model-usage-by-team"
       },
-      # -----------------------------------------------------------------------
-      # Panel 3: Estimated Cost Trend (line chart)
-      # -----------------------------------------------------------------------
+      # ---------------------------------------------------------------------
+      # Panel 3: 팀별 예상 비용 추이 (line chart)
+      # ---------------------------------------------------------------------
       {
         type = 3
         content = {
           version                 = "KqlItem/1.0"
           query                   = <<-KQL
-            let all_data = union
+            let model_pricing = datatable(model_name: string, input_per_1k: real, output_per_1k: real) [
+                "gpt-4o",             0.0025,  0.01,
+                "gpt-4.1-mini",       0.0004,  0.0016,
+                "gpt-5.4-mini",       0.0004,  0.0016,
+                "o3-mini",            0.0011,  0.0044,
+                "text-embedding-3-large", 0.00013, 0.0
+            ];
+            let all_metrics = union
+              ${local.workspace_metrics_union};
+            let all_logs = union
               ${local.workspace_union};
-            all_data
+            let team_tokens = all_metrics
+            | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
+            | where MetricName in ("InputTokens", "OutputTokens")
+            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | summarize
+                TeamInputTokens = sumif(Total, MetricName == "InputTokens"),
+                TeamOutputTokens = sumif(Total, MetricName == "OutputTokens")
+              by bin(TimeGenerated, 1d), team_name;
+            let model_dist = all_logs
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
-            | summarize
-                AvgDurationMs = round(avg(DurationMs), 1),
-                P95DurationMs = round(percentile(DurationMs, 95), 1),
-                RequestCount = count()
-              by bin(TimeGenerated, 1d), model_name, team_name
+            | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
+            | summarize TotalRespBytes = sum(resp_bytes) by bin(TimeGenerated, 1d), team_name, model_name;
+            let day_team_total = model_dist | summarize DayTeamTotal = sum(TotalRespBytes) by TimeGenerated, team_name;
+            model_dist
+            | join kind=inner day_team_total on TimeGenerated, team_name
+            | join kind=inner team_tokens on TimeGenerated, team_name
+            | extend Weight = iff(DayTeamTotal > 0, TotalRespBytes / DayTeamTotal, 0.0)
+            | extend ModelInput = TeamInputTokens * Weight
+            | extend ModelOutput = TeamOutputTokens * Weight
+            | lookup kind=leftouter model_pricing on model_name
+            | extend EstCostUSD = round(ModelInput / 1000.0 * coalesce(input_per_1k, 0.001) + ModelOutput / 1000.0 * coalesce(output_per_1k, 0.002), 4)
+            | summarize DailyCostUSD = round(sum(EstCostUSD), 4) by bin(TimeGenerated, 1d), team_name
             | order by TimeGenerated desc
           KQL
           size                    = 0
@@ -153,30 +195,29 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           crossComponentResources = local.workspace_ids
           visualization           = "linechart"
           chartSettings = {
-            xAxis             = "TimeGenerated"
-            yAxis             = ["AvgDurationMs"]
-            group             = "model_name"
-            seriesLabelFormat = "{model_name} ({team_name})"
+            xAxis = "TimeGenerated"
+            yAxis = ["DailyCostUSD"]
+            group = "team_name"
           }
         }
-        name = "response-time-trend"
+        name = "cost-trend-by-team"
       },
-      # -----------------------------------------------------------------------
-      # Panel 4: Request Count Daily (bar chart)
-      # -----------------------------------------------------------------------
+      # ---------------------------------------------------------------------
+      # Panel 4: 팀별 일별 요청 수 (bar chart)
+      # ---------------------------------------------------------------------
       {
         type = 3
         content = {
           version                 = "KqlItem/1.0"
           query                   = <<-KQL
-            let all_data = union
+            let all_logs = union
               ${local.workspace_union};
-            all_data
+            all_logs
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
-            | summarize RequestCount = count() by bin(TimeGenerated, 1d), model_name, team_name
+            | summarize RequestCount = count() by bin(TimeGenerated, 1d), team_name, model_name
             | order by TimeGenerated desc
           KQL
           size                    = 0
@@ -188,40 +229,72 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           chartSettings = {
             xAxis             = "TimeGenerated"
             yAxis             = ["RequestCount"]
-            group             = "model_name"
-            seriesLabelFormat = "{model_name} ({team_name})"
+            group             = "team_name"
+            seriesLabelFormat = "{team_name} ({model_name})"
           }
         }
-        name = "request-count-daily"
+        name = "request-count-by-team"
       },
-      # -----------------------------------------------------------------------
-      # Panel 5: Team Comparison (table)
-      # -----------------------------------------------------------------------
+      # ---------------------------------------------------------------------
+      # Panel 5 header: 팀 비교
+      # ---------------------------------------------------------------------
       {
         type = 1
         content = {
-          json = "## Team Comparison"
+          json = "## 팀 비교"
         }
         name = "team-comparison-header"
       },
+      # ---------------------------------------------------------------------
+      # Panel 5: 팀 비교 (table)
+      # ---------------------------------------------------------------------
       {
         type = 3
         content = {
           version                 = "KqlItem/1.0"
           query                   = <<-KQL
-            let all_data = union
+            let model_pricing = datatable(model_name: string, input_per_1k: real, output_per_1k: real) [
+                "gpt-4o",             0.0025,  0.01,
+                "gpt-4.1-mini",       0.0004,  0.0016,
+                "gpt-5.4-mini",       0.0004,  0.0016,
+                "o3-mini",            0.0011,  0.0044,
+                "text-embedding-3-large", 0.00013, 0.0
+            ];
+            let all_metrics = union
+              ${local.workspace_metrics_union};
+            let all_logs = union
               ${local.workspace_union};
-            all_data
+            let team_tokens = all_metrics
+            | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
+            | where MetricName in ("InputTokens", "OutputTokens")
+            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | summarize
+                InputTokens = round(sumif(Total, MetricName == "InputTokens")),
+                OutputTokens = round(sumif(Total, MetricName == "OutputTokens")),
+                TotalTokens = round(sumif(Total, MetricName == "InputTokens") + sumif(Total, MetricName == "OutputTokens"))
+              by team_name;
+            let team_reqs = all_logs
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
-            | summarize
-                TotalRequests = count(),
-                AvgDurationMs = round(avg(DurationMs), 1),
-                TotalResponseBytes = sum(toint(parse_json(properties_s).responseLength))
-              by team_name
-            | order by TotalRequests desc
+            | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
+            | summarize Requests = count(), TotalRespBytes = sum(resp_bytes) by team_name, model_name;
+            let team_total_resp = team_reqs | summarize TeamTotalResp = sum(TotalRespBytes) by team_name;
+            let est_cost = team_reqs
+            | join kind=inner team_total_resp on team_name
+            | join kind=inner team_tokens on team_name
+            | extend Weight = iff(TeamTotalResp > 0, TotalRespBytes / TeamTotalResp, 0.0)
+            | extend ModelInput = InputTokens * Weight
+            | extend ModelOutput = OutputTokens * Weight
+            | lookup kind=leftouter model_pricing on model_name
+            | extend cost = ModelInput / 1000.0 * coalesce(input_per_1k, 0.001) + ModelOutput / 1000.0 * coalesce(output_per_1k, 0.002)
+            | summarize EstCostUSD = round(sum(cost), 4) by team_name;
+            team_tokens
+            | join kind=inner (all_logs | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES" | where Category == "RequestResponse" | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId) | summarize TotalRequests = count() by team_name) on team_name
+            | join kind=leftouter est_cost on team_name
+            | project team_name, TotalRequests, InputTokens, OutputTokens, TotalTokens, EstCostUSD
+            | order by TotalTokens desc
           KQL
           size                    = 0
           timeContext             = { durationMs = 2592000000 }
@@ -230,7 +303,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
           crossComponentResources = local.workspace_ids
           visualization           = "table"
           gridSettings = {
-            sortBy = [{ itemKey = "TotalRequests", sortOrder = 2 }]
+            sortBy = [{ itemKey = "TotalTokens", sortOrder = 2 }]
           }
         }
         name = "team-comparison"

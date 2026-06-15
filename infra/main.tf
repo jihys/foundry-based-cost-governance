@@ -184,27 +184,33 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
   data_json = jsonencode({
     version = "Notebook/1.0"
     items = [
+      # ---------------------------------------------------------------------
+      # Header
+      # ---------------------------------------------------------------------
       {
         type = 1
         content = {
-          json = "# Cost Dashboard — ${var.team_name}\nRequest activity and performance monitoring for Azure AI Services."
+          json = "# Cost Dashboard — ${var.team_name}\n팀별 AI 모델 토큰 사용량 및 비용 모니터링"
         }
         name = "header"
       },
+      # ---------------------------------------------------------------------
+      # Panel 1: 일별 토큰 사용량 (bar chart)
+      # ---------------------------------------------------------------------
       {
         type = 3
         content = {
           version                 = "KqlItem/1.0"
           query                   = <<-KQL
-            AzureDiagnostics
+            let tokens = AzureMetrics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
-            | extend model_name = tostring(parse_json(properties_s).modelName)
+            | where MetricName in ("InputTokens", "OutputTokens")
             | summarize
-                RequestCount = count(),
-                AvgDurationMs = round(avg(DurationMs), 1),
-                TotalResponseBytes = sum(toint(parse_json(properties_s).responseLength))
-              by bin(TimeGenerated, 1d), model_name
+                InputTokens = sumif(Total, MetricName == "InputTokens"),
+                OutputTokens = sumif(Total, MetricName == "OutputTokens"),
+                TotalTokens = sumif(Total, MetricName == "InputTokens") + sumif(Total, MetricName == "OutputTokens")
+              by bin(TimeGenerated, 1d);
+            tokens
             | order by TimeGenerated desc
           KQL
           size                    = 0
@@ -215,30 +221,39 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           visualization           = "barchart"
           chartSettings = {
             xAxis = "TimeGenerated"
-            yAxis = ["RequestCount"]
-            group = "model_name"
+            yAxis = ["InputTokens", "OutputTokens"]
           }
         }
-        name = "request-activity-daily"
+        name = "token-usage-daily"
       },
+      # ---------------------------------------------------------------------
+      # Panel 2: 모델별 사용량 요약 (table)
+      # ---------------------------------------------------------------------
       {
         type = 3
         content = {
           version                 = "KqlItem/1.0"
           query                   = <<-KQL
-            AzureDiagnostics
+            let model_reqs = AzureDiagnostics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend model_name = tostring(parse_json(properties_s).modelName)
-            | extend req_len = toint(parse_json(properties_s).requestLength)
-            | extend resp_len = toint(parse_json(properties_s).responseLength)
+            | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
             | summarize
-                TotalRequests = count(),
+                Requests = count(),
                 AvgDurationMs = round(avg(DurationMs), 1),
-                TotalRequestBytes = sum(req_len),
-                TotalResponseBytes = sum(resp_len)
-              by model_name
-            | order by TotalRequests desc
+                TotalRespBytes = sum(resp_bytes)
+              by model_name;
+            let total_resp = toscalar(model_reqs | summarize sum(TotalRespBytes));
+            let total_input = toscalar(AzureMetrics | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES" | where MetricName == "InputTokens" | summarize sum(Total));
+            let total_output = toscalar(AzureMetrics | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES" | where MetricName == "OutputTokens" | summarize sum(Total));
+            model_reqs
+            | extend Weight = iff(total_resp > 0, TotalRespBytes / total_resp, 0.0)
+            | extend InputTokens = round(total_input * Weight)
+            | extend OutputTokens = round(total_output * Weight)
+            | extend TotalTokens = InputTokens + OutputTokens
+            | project model_name, Requests, InputTokens, OutputTokens, TotalTokens, AvgDurationMs
+            | order by TotalTokens desc
           KQL
           size                    = 0
           timeContext             = { durationMs = 2592000000 }
@@ -247,22 +262,46 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           crossComponentResources = [azurerm_log_analytics_workspace.main.id]
           visualization           = "table"
         }
-        name = "model-summary"
+        name = "model-usage-summary"
       },
+      # ---------------------------------------------------------------------
+      # Panel 3: 예상 비용 추이 (line chart)
+      # ---------------------------------------------------------------------
       {
         type = 3
         content = {
           version                 = "KqlItem/1.0"
           query                   = <<-KQL
-            AzureDiagnostics
+            let model_pricing = datatable(model_name: string, input_per_1k: real, output_per_1k: real) [
+                "gpt-4o",             0.0025,  0.01,
+                "gpt-4.1-mini",       0.0004,  0.0016,
+                "gpt-5.4-mini",       0.0004,  0.0016,
+                "o3-mini",            0.0011,  0.0044,
+                "text-embedding-3-large", 0.00013, 0.0
+            ];
+            let hourly_tokens = AzureMetrics
+            | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
+            | where MetricName in ("InputTokens", "OutputTokens")
+            | summarize
+                InputTokens = sumif(Total, MetricName == "InputTokens"),
+                OutputTokens = sumif(Total, MetricName == "OutputTokens")
+              by bin(TimeGenerated, 1d);
+            let hourly_models = AzureDiagnostics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend model_name = tostring(parse_json(properties_s).modelName)
-            | summarize
-                AvgDurationMs = round(avg(DurationMs), 1),
-                P95DurationMs = round(percentile(DurationMs, 95), 1),
-                RequestCount = count()
-              by bin(TimeGenerated, 1d), model_name
+            | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
+            | summarize TotalRespBytes = sum(resp_bytes), Requests = count() by bin(TimeGenerated, 1d), model_name;
+            let daily_total_resp = hourly_models | summarize DayTotalResp = sum(TotalRespBytes) by TimeGenerated;
+            hourly_models
+            | join kind=inner daily_total_resp on TimeGenerated
+            | extend Weight = iff(DayTotalResp > 0, TotalRespBytes / DayTotalResp, 0.0)
+            | join kind=inner hourly_tokens on TimeGenerated
+            | extend ModelInputTokens = InputTokens * Weight
+            | extend ModelOutputTokens = OutputTokens * Weight
+            | lookup kind=leftouter model_pricing on model_name
+            | extend EstCostUSD = round(ModelInputTokens / 1000.0 * coalesce(input_per_1k, 0.001) + ModelOutputTokens / 1000.0 * coalesce(output_per_1k, 0.002), 4)
+            | project TimeGenerated, model_name, EstCostUSD
             | order by TimeGenerated desc
           KQL
           size                    = 0
@@ -273,12 +312,15 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           visualization           = "linechart"
           chartSettings = {
             xAxis = "TimeGenerated"
-            yAxis = ["AvgDurationMs"]
+            yAxis = ["EstCostUSD"]
             group = "model_name"
           }
         }
-        name = "response-time-trend"
+        name = "estimated-cost-trend"
       },
+      # ---------------------------------------------------------------------
+      # Panel 4: 일별 요청 수 (bar chart)
+      # ---------------------------------------------------------------------
       {
         type = 3
         content = {
@@ -304,6 +346,38 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           }
         }
         name = "request-count-daily"
+      },
+      # ---------------------------------------------------------------------
+      # Panel 5: 응답 성능 (line chart)
+      # ---------------------------------------------------------------------
+      {
+        type = 3
+        content = {
+          version                 = "KqlItem/1.0"
+          query                   = <<-KQL
+            AzureDiagnostics
+            | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
+            | where Category == "RequestResponse"
+            | extend model_name = tostring(parse_json(properties_s).modelName)
+            | summarize
+                AvgDurationMs = round(avg(DurationMs), 1),
+                P95DurationMs = round(percentile(DurationMs, 95), 1)
+              by bin(TimeGenerated, 1d), model_name
+            | order by TimeGenerated desc
+          KQL
+          size                    = 0
+          timeContext             = { durationMs = 2592000000 }
+          queryType               = 0
+          resourceType            = "microsoft.operationalinsights/workspaces"
+          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
+          visualization           = "linechart"
+          chartSettings = {
+            xAxis = "TimeGenerated"
+            yAxis = ["AvgDurationMs"]
+            group = "model_name"
+          }
+        }
+        name = "response-performance"
       }
     ]
     fallbackResourceIds = []
