@@ -10,21 +10,98 @@ A PoC sample that isolates Azure Subscriptions per Team, deploys AI Foundry reso
 
 ### Architecture
 
-```
-Team (catalog, image, search)
- └── Subscription (1:1)
-      ├── Foundry Resource (1:N per region — based on model availability)
-      │    ├── Model Deployment (gpt-4o, text-embedding-3-large, o3-mini …)
-      │    └── Resource Key (Key1, Key2)
-      ├── Application Insights (1:1 — collects token telemetry)
-      │    └── Cost Dashboard (Workbook — visualized via KQL queries)
-      └── Budget Alert (monthly cost threshold notification)
+#### Overall Structure
+
+Each Team is assigned an independent Azure Subscription, and a separate **Management Subscription** provides a unified view of usage across all teams.
+
+```mermaid
+flowchart TD
+    subgraph ORG["🏢 Azure Organization"]
+        direction TB
+        subgraph SUB_A["📦 Team A Subscription<br/>(e.g. coupang-catalog)"]
+            direction TB
+            RG_A["Resource Group<br/>rg-catalog-ai-foundry"]
+            AI_A["Azure AI Services<br/>ai-catalog-eastus"]
+            DEPLOY_A["Model Deployments<br/>gpt-4.1-mini, gpt-5.4-mini, etc."]
+            LAW_A["Log Analytics Workspace<br/>law-catalog"]
+            APPI_A["Application Insights<br/>appi-catalog"]
+            DIAG_A["Diagnostic Settings"]
+            WB_A["Per-Team Cost Dashboard<br/>(Azure Monitor Workbook)"]
+            BUDGET_A["Consumption Budget<br/>80% / 100% / 120% alerts"]
+
+            RG_A --> AI_A
+            AI_A --> DEPLOY_A
+            RG_A --> LAW_A
+            RG_A --> APPI_A
+            APPI_A -.->|linked| LAW_A
+            AI_A -->|request/response logs| DIAG_A
+            DIAG_A -->|RequestResponse<br/>AzureOpenAIRequestUsage<br/>Audit| LAW_A
+            LAW_A -->|KQL query| WB_A
+            RG_A --> BUDGET_A
+        end
+
+        subgraph SUB_B["📦 Team B Subscription<br/>(e.g. coupang-image)"]
+            direction TB
+            RG_B["Resource Group<br/>rg-image-ai-foundry"]
+            AI_B["Azure AI Services<br/>ai-image-eastus"]
+            DEPLOY_B["Model Deployments"]
+            LAW_B["Log Analytics Workspace<br/>law-image"]
+            APPI_B["Application Insights<br/>appi-image"]
+            DIAG_B["Diagnostic Settings"]
+            WB_B["Per-Team Cost Dashboard"]
+            BUDGET_B["Consumption Budget"]
+
+            RG_B --> AI_B
+            AI_B --> DEPLOY_B
+            RG_B --> LAW_B
+            RG_B --> APPI_B
+            APPI_B -.->|linked| LAW_B
+            AI_B -->|request/response logs| DIAG_B
+            DIAG_B -->|telemetry logs| LAW_B
+            LAW_B -->|KQL query| WB_B
+            RG_B --> BUDGET_B
+        end
+
+        subgraph SUB_MGMT["🔍 Management Subscription<br/>(Unified Dashboard)"]
+            direction TB
+            RG_MGMT["Resource Group<br/>rg-unified-cost-dashboard"]
+            WB_UNIFIED["Unified Cost Dashboard<br/>(Azure Monitor Workbook)"]
+            RG_MGMT --> WB_UNIFIED
+        end
+
+        LAW_A -->|cross-workspace KQL| WB_UNIFIED
+        LAW_B -->|cross-workspace KQL| WB_UNIFIED
+    end
 ```
 
-- **Team**: A project team. Each Team owns a dedicated Subscription
-- **Foundry Resource**: An Azure AI Services account per region within a Subscription. Each has its own independent endpoint and Resource Key
-- **Resource Key**: API key-based authentication. Terraform output → Python script writes keys to a single Excel file
-- **Cost Dashboard**: Collects token usage/cost from Application Insights and visualizes via Azure Monitor Workbook
+#### Why Separate Subscriptions?
+
+| Purpose | Description |
+|---------|-------------|
+| **Cost Isolation** | Subscriptions are the fundamental boundary for Azure cost management. Separating by team automatically scopes budgets, billing, and cost analysis to each team. |
+| **Governance Boundary** | RBAC policies, resource limits, and budget alerts can be applied independently per team. |
+| **Management Subscription Separation** | The Unified Dashboard is placed in a separate Management Subscription, allowing organization-wide visibility without affecting individual team subscriptions. |
+
+#### Data Flow (Telemetry Pipeline)
+
+```
+AI Services  →  Diagnostic Settings  →  Log Analytics  →  Workbook (KQL)
+(API calls)     (log routing)           (storage)         (visualization)
+```
+
+1. Team members call the AI Services endpoint (Chat Completion, Embedding, etc.)
+2. **Diagnostic Settings** forward `RequestResponse`, `AzureOpenAIRequestUsage`, and `Audit` logs to the Log Analytics Workspace
+3. Each team's **Cost Dashboard** (Workbook) runs KQL queries against its own Log Analytics to visualize token usage and costs
+4. The **Unified Dashboard** uses `workspace('<ARM_ID>').AzureDiagnostics` cross-workspace KQL to union-query all teams' Log Analytics, providing a consolidated dashboard
+
+#### Key Resources Summary
+
+- **Azure AI Services** (`ai-{team}-{region}`): AI service account hosting model deployments (e.g. gpt-4.1-mini) and Resource Keys (Key1, Key2)
+- **Log Analytics Workspace** (`law-{team}`): Central store for all telemetry logs
+- **Application Insights** (`appi-{team}`): APM linked to Log Analytics, used for request tracing
+- **Cost Dashboard**: Azure Monitor Workbook using KQL queries to visualize token usage, estimated costs, and per-model statistics
+- **Consumption Budget**: Sends email alerts when monthly budget thresholds (80%/100%/120%) are reached
+- **Unified Cost Dashboard**: Cross-subscription KQL from the Management Subscription for organization-wide usage (daily token trends, per-model summary, cost trends, team comparison — 5 panels)
 
 ## Prerequisites
 
