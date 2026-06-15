@@ -122,6 +122,10 @@ resource "azurerm_monitor_diagnostic_setting" "ai" {
     category = "Audit"
   }
 
+  enabled_log {
+    category = "AzureOpenAIRequestUsage"
+  }
+
   enabled_metric {
     category = "AllMetrics"
   }
@@ -138,7 +142,7 @@ resource "azurerm_consumption_budget_subscription" "main" {
   time_grain      = "Monthly"
 
   time_period {
-    start_date = "2025-01-01T00:00:00Z"
+    start_date = "2026-06-01T00:00:00Z"
   }
 
   notification {
@@ -194,7 +198,7 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           query         = <<-KQL
             AzureDiagnostics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where Category == "AzureOpenAIRequestUsage"
             | extend props = parse_json(properties_s)
             | extend model_name = tostring(props.modelName)
             | extend prompt_tokens = toint(props.promptTokens)
@@ -228,7 +232,7 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           query         = <<-KQL
             AzureDiagnostics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where Category == "AzureOpenAIRequestUsage"
             | extend props = parse_json(properties_s)
             | extend model_name = tostring(props.modelName)
             | extend prompt_tokens = toint(props.promptTokens)
@@ -263,7 +267,7 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
             ];
             AzureDiagnostics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where Category == "AzureOpenAIRequestUsage"
             | extend props = parse_json(properties_s)
             | extend model_name = tostring(props.modelName)
             | extend prompt_tokens = toint(props.promptTokens)
@@ -297,7 +301,7 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
           query         = <<-KQL
             AzureDiagnostics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where Category == "AzureOpenAIRequestUsage"
             | extend props = parse_json(properties_s)
             | extend model_name = tostring(props.modelName)
             | summarize RequestCount = count() by bin(TimeGenerated, 1d), model_name

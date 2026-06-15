@@ -63,7 +63,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where Category == "AzureOpenAIRequestUsage"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | extend props = parse_json(properties_s)
             | extend model_name = tostring(props.modelName)
@@ -104,7 +104,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where Category == "AzureOpenAIRequestUsage"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | extend props = parse_json(properties_s)
             | extend model_name = tostring(props.modelName)
@@ -145,7 +145,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where Category == "AzureOpenAIRequestUsage"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | extend props = parse_json(properties_s)
             | extend model_name = tostring(props.modelName)
@@ -186,7 +186,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where Category == "AzureOpenAIRequestUsage"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | extend props = parse_json(properties_s)
             | extend model_name = tostring(props.modelName)
@@ -232,7 +232,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "RequestResponse"
+            | where Category == "AzureOpenAIRequestUsage"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
             | extend props = parse_json(properties_s)
             | extend model_name = tostring(props.modelName)
