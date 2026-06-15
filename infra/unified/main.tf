@@ -73,7 +73,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             let tokens = all_metrics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where MetricName in ("InputTokens", "OutputTokens")
-            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | summarize
                 InputTokens = sumif(Total, MetricName == "InputTokens"),
                 OutputTokens = sumif(Total, MetricName == "OutputTokens")
@@ -110,7 +110,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             let model_reqs = all_logs
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
-            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
             | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
             | summarize Requests = count(), TotalRespBytes = sum(resp_bytes), AvgDurationMs = round(avg(DurationMs), 1) by team_name, model_name;
@@ -118,7 +118,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             let team_tokens = all_metrics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where MetricName in ("InputTokens", "OutputTokens")
-            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | summarize
                 TeamInputTokens = sumif(Total, MetricName == "InputTokens"),
                 TeamOutputTokens = sumif(Total, MetricName == "OutputTokens")
@@ -164,7 +164,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             let team_tokens = all_metrics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where MetricName in ("InputTokens", "OutputTokens")
-            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | summarize
                 TeamInputTokens = sumif(Total, MetricName == "InputTokens"),
                 TeamOutputTokens = sumif(Total, MetricName == "OutputTokens")
@@ -172,7 +172,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             let model_dist = all_logs
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
-            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
             | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
             | summarize TotalRespBytes = sum(resp_bytes) by bin(TimeGenerated, 1d), team_name, model_name;
@@ -215,7 +215,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             all_logs
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
-            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
             | summarize RequestCount = count() by bin(TimeGenerated, 1d), team_name, model_name
             | order by TimeGenerated desc
@@ -267,7 +267,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             let team_tokens = all_metrics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where MetricName in ("InputTokens", "OutputTokens")
-            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | summarize
                 InputTokens = round(sumif(Total, MetricName == "InputTokens")),
                 OutputTokens = round(sumif(Total, MetricName == "OutputTokens")),
@@ -276,7 +276,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             let team_reqs = all_logs
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
-            | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
+            | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
             | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
             | summarize Requests = count(), TotalRespBytes = sum(resp_bytes) by team_name, model_name;
@@ -291,7 +291,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             | extend cost = ModelInput / 1000.0 * coalesce(input_per_1k, 0.001) + ModelOutput / 1000.0 * coalesce(output_per_1k, 0.002)
             | summarize EstCostUSD = round(sum(cost), 4) by team_name;
             team_tokens
-            | join kind=inner (all_logs | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES" | where Category == "RequestResponse" | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId) | summarize TotalRequests = count() by team_name) on team_name
+            | join kind=inner (all_logs | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES" | where Category == "RequestResponse" | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId) | summarize TotalRequests = count() by team_name) on team_name
             | join kind=leftouter est_cost on team_name
             | project team_name, TotalRequests, InputTokens, OutputTokens, TotalTokens, EstCostUSD
             | order by TotalTokens desc
