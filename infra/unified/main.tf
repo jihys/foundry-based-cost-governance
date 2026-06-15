@@ -49,7 +49,7 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
       {
         type = 1
         content = {
-          json = "# Unified Cost Dashboard — All Teams\nCross-team token usage and cost monitoring for Azure AI Services.\n\nTeams: ${join(", ", keys(var.team_workspaces))}"
+          json = "# Unified Cost Dashboard — All Teams\nCross-team request activity and performance monitoring for Azure AI Services.\n\nTeams: ${join(", ", keys(var.team_workspaces))}"
         }
         name = "header"
       },
@@ -59,41 +59,36 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
       {
         type = 3
         content = {
-          version       = "KqlItem/1.0"
-          query         = <<-KQL
+          version                 = "KqlItem/1.0"
+          query                   = <<-KQL
             let all_data = union
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "AzureOpenAIRequestUsage"
+            | where Category == "RequestResponse"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
-            | extend props = parse_json(properties_s)
-            | extend model_name = tostring(props.modelName)
-            | extend prompt_tokens = toint(props.promptTokens)
-            | extend completion_tokens = toint(props.completionTokens)
-            | extend total_tokens = prompt_tokens + completion_tokens
+            | extend model_name = tostring(parse_json(properties_s).modelName)
             | summarize
-                TotalPromptTokens = sum(prompt_tokens),
-                TotalCompletionTokens = sum(completion_tokens),
-                TotalTokens = sum(total_tokens),
-                Requests = count()
+                RequestCount = count(),
+                AvgDurationMs = round(avg(DurationMs), 1),
+                TotalResponseBytes = sum(toint(parse_json(properties_s).responseLength))
               by bin(TimeGenerated, 1d), model_name, team_name
             | order by TimeGenerated desc
           KQL
-          size          = 0
-          timeContext   = { durationMs = 2592000000 }
-          queryType     = 0
-          resourceType  = "microsoft.operationalinsights/workspaces"
+          size                    = 0
+          timeContext             = { durationMs = 2592000000 }
+          queryType               = 0
+          resourceType            = "microsoft.operationalinsights/workspaces"
           crossComponentResources = local.workspace_ids
-          visualization = "barchart"
+          visualization           = "barchart"
           chartSettings = {
-            xAxis     = "TimeGenerated"
-            yAxis     = ["TotalTokens"]
-            group     = "model_name"
+            xAxis             = "TimeGenerated"
+            yAxis             = ["RequestCount"]
+            group             = "model_name"
             seriesLabelFormat = "{model_name} ({team_name})"
           }
         }
-        name = "token-usage-daily"
+        name = "request-activity-daily"
       },
       # -----------------------------------------------------------------------
       # Panel 2: Token Summary by Model (table)
@@ -101,35 +96,33 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
       {
         type = 3
         content = {
-          version       = "KqlItem/1.0"
-          query         = <<-KQL
+          version                 = "KqlItem/1.0"
+          query                   = <<-KQL
             let all_data = union
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "AzureOpenAIRequestUsage"
+            | where Category == "RequestResponse"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
-            | extend props = parse_json(properties_s)
-            | extend model_name = tostring(props.modelName)
-            | extend prompt_tokens = toint(props.promptTokens)
-            | extend completion_tokens = toint(props.completionTokens)
-            | extend total_tokens = prompt_tokens + completion_tokens
+            | extend model_name = tostring(parse_json(properties_s).modelName)
+            | extend req_len = toint(parse_json(properties_s).requestLength)
+            | extend resp_len = toint(parse_json(properties_s).responseLength)
             | summarize
-                PromptTokens = sum(prompt_tokens),
-                CompletionTokens = sum(completion_tokens),
-                TotalTokens = sum(total_tokens),
-                TotalRequests = count()
+                TotalRequests = count(),
+                AvgDurationMs = round(avg(DurationMs), 1),
+                TotalRequestBytes = sum(req_len),
+                TotalResponseBytes = sum(resp_len)
               by model_name, team_name
-            | order by TotalTokens desc
+            | order by TotalRequests desc
           KQL
-          size          = 0
-          timeContext   = { durationMs = 2592000000 }
-          queryType     = 0
-          resourceType  = "microsoft.operationalinsights/workspaces"
+          size                    = 0
+          timeContext             = { durationMs = 2592000000 }
+          queryType               = 0
+          resourceType            = "microsoft.operationalinsights/workspaces"
           crossComponentResources = local.workspace_ids
-          visualization = "table"
+          visualization           = "table"
         }
-        name = "token-summary-by-model"
+        name = "model-summary"
       },
       # -----------------------------------------------------------------------
       # Panel 3: Estimated Cost Trend (line chart)
@@ -137,47 +130,36 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
       {
         type = 3
         content = {
-          version       = "KqlItem/1.0"
-          query         = <<-KQL
-            let model_pricing = datatable(model_name: string, input_price_per_1k: real, output_price_per_1k: real) [
-                "gpt-4o",                  0.0025,  0.01,
-                "gpt-4.1-mini",            0.0004,  0.0016,
-                "o3-mini",                 0.0011,  0.0044,
-                "text-embedding-3-large",  0.00013, 0.0
-            ];
+          version                 = "KqlItem/1.0"
+          query                   = <<-KQL
             let all_data = union
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "AzureOpenAIRequestUsage"
+            | where Category == "RequestResponse"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
-            | extend props = parse_json(properties_s)
-            | extend model_name = tostring(props.modelName)
-            | extend prompt_tokens = toint(props.promptTokens)
-            | extend completion_tokens = toint(props.completionTokens)
-            | lookup kind=leftouter model_pricing on model_name
-            | extend input_cost = prompt_tokens / 1000.0 * coalesce(input_price_per_1k, 0.001)
-            | extend output_cost = completion_tokens / 1000.0 * coalesce(output_price_per_1k, 0.002)
-            | extend total_cost = input_cost + output_cost
+            | extend model_name = tostring(parse_json(properties_s).modelName)
             | summarize
-                DailyCostUSD = sum(total_cost)
+                AvgDurationMs = round(avg(DurationMs), 1),
+                P95DurationMs = round(percentile(DurationMs, 95), 1),
+                RequestCount = count()
               by bin(TimeGenerated, 1d), model_name, team_name
             | order by TimeGenerated desc
           KQL
-          size          = 0
-          timeContext   = { durationMs = 2592000000 }
-          queryType     = 0
-          resourceType  = "microsoft.operationalinsights/workspaces"
+          size                    = 0
+          timeContext             = { durationMs = 2592000000 }
+          queryType               = 0
+          resourceType            = "microsoft.operationalinsights/workspaces"
           crossComponentResources = local.workspace_ids
-          visualization = "linechart"
+          visualization           = "linechart"
           chartSettings = {
-            xAxis = "TimeGenerated"
-            yAxis = ["DailyCostUSD"]
-            group = "model_name"
+            xAxis             = "TimeGenerated"
+            yAxis             = ["AvgDurationMs"]
+            group             = "model_name"
             seriesLabelFormat = "{model_name} ({team_name})"
           }
         }
-        name = "estimated-cost-trend"
+        name = "response-time-trend"
       },
       # -----------------------------------------------------------------------
       # Panel 4: Request Count Daily (bar chart)
@@ -185,29 +167,28 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
       {
         type = 3
         content = {
-          version       = "KqlItem/1.0"
-          query         = <<-KQL
+          version                 = "KqlItem/1.0"
+          query                   = <<-KQL
             let all_data = union
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "AzureOpenAIRequestUsage"
+            | where Category == "RequestResponse"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
-            | extend props = parse_json(properties_s)
-            | extend model_name = tostring(props.modelName)
+            | extend model_name = tostring(parse_json(properties_s).modelName)
             | summarize RequestCount = count() by bin(TimeGenerated, 1d), model_name, team_name
             | order by TimeGenerated desc
           KQL
-          size          = 0
-          timeContext   = { durationMs = 2592000000 }
-          queryType     = 0
-          resourceType  = "microsoft.operationalinsights/workspaces"
+          size                    = 0
+          timeContext             = { durationMs = 2592000000 }
+          queryType               = 0
+          resourceType            = "microsoft.operationalinsights/workspaces"
           crossComponentResources = local.workspace_ids
-          visualization = "barchart"
+          visualization           = "barchart"
           chartSettings = {
-            xAxis     = "TimeGenerated"
-            yAxis     = ["RequestCount"]
-            group     = "model_name"
+            xAxis             = "TimeGenerated"
+            yAxis             = ["RequestCount"]
+            group             = "model_name"
             seriesLabelFormat = "{model_name} ({team_name})"
           }
         }
@@ -226,46 +207,30 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
       {
         type = 3
         content = {
-          version       = "KqlItem/1.0"
-          query         = <<-KQL
-            let model_pricing = datatable(model_name: string, input_price_per_1k: real, output_price_per_1k: real) [
-                "gpt-4o",                  0.0025,  0.01,
-                "gpt-4.1-mini",            0.0004,  0.0016,
-                "o3-mini",                 0.0011,  0.0044,
-                "text-embedding-3-large",  0.00013, 0.0
-            ];
+          version                 = "KqlItem/1.0"
+          query                   = <<-KQL
             let all_data = union
               ${local.workspace_union};
             all_data
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
-            | where Category == "AzureOpenAIRequestUsage"
+            | where Category == "RequestResponse"
             | extend team_name = extract("workspaces/law-(.*)", 1, _ResourceId)
-            | extend props = parse_json(properties_s)
-            | extend model_name = tostring(props.modelName)
-            | extend prompt_tokens = toint(props.promptTokens)
-            | extend completion_tokens = toint(props.completionTokens)
-            | extend total_tokens = prompt_tokens + completion_tokens
-            | lookup kind=leftouter model_pricing on model_name
-            | extend input_cost = prompt_tokens / 1000.0 * coalesce(input_price_per_1k, 0.001)
-            | extend output_cost = completion_tokens / 1000.0 * coalesce(output_price_per_1k, 0.002)
-            | extend total_cost = input_cost + output_cost
+            | extend model_name = tostring(parse_json(properties_s).modelName)
             | summarize
-                TotalPromptTokens = sum(prompt_tokens),
-                TotalCompletionTokens = sum(completion_tokens),
-                TotalTokens = sum(total_tokens),
                 TotalRequests = count(),
-                EstimatedCostUSD = round(sum(total_cost), 4)
+                AvgDurationMs = round(avg(DurationMs), 1),
+                TotalResponseBytes = sum(toint(parse_json(properties_s).responseLength))
               by team_name
-            | order by EstimatedCostUSD desc
+            | order by TotalRequests desc
           KQL
-          size          = 0
-          timeContext   = { durationMs = 2592000000 }
-          queryType     = 0
-          resourceType  = "microsoft.operationalinsights/workspaces"
+          size                    = 0
+          timeContext             = { durationMs = 2592000000 }
+          queryType               = 0
+          resourceType            = "microsoft.operationalinsights/workspaces"
           crossComponentResources = local.workspace_ids
-          visualization = "table"
+          visualization           = "table"
           gridSettings = {
-            sortBy = [{ itemKey = "EstimatedCostUSD", sortOrder = 2 }]
+            sortBy = [{ itemKey = "TotalRequests", sortOrder = 2 }]
           }
         }
         name = "team-comparison"
