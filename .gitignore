@@ -16,3 +16,8 @@ build/
 *.tfstate
 *.tfstate.backup
 *.tfplan
+*.tfvars
+!*.tfvars.example
+
+# Sensitive outputs (keys, secrets)
+output/

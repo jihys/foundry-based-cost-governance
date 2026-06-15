@@ -1,0 +1,7 @@
+subscription_id = "<YOUR_MANAGEMENT_SUBSCRIPTION_ID>"
+location        = "eastus"
+
+team_workspaces = {
+  "catalog" = "/subscriptions/<CATALOG_SUB_ID>/resourceGroups/rg-catalog-ai-foundry/providers/Microsoft.OperationalInsights/workspaces/law-catalog"
+  "image"   = "/subscriptions/<IMAGE_SUB_ID>/resourceGroups/rg-image-ai-foundry/providers/Microsoft.OperationalInsights/workspaces/law-image"
+}
