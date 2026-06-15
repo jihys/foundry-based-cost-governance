@@ -9,3 +9,15 @@ build/
 .scratch/
 .pytest_cache/
 *.log
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+*.tfvars
+!*.tfvars.example
+
+# Sensitive outputs (keys, secrets)
+output/

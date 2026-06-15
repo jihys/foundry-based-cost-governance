@@ -1,0 +1,15 @@
+team_name       = "search"
+subscription_id = "<YOUR_SUBSCRIPTION_ID>"
+alert_email     = "search-team@example.com"
+
+regions = {
+  "eastus" = [
+    {
+      name     = "gpt-41-mini"
+      model    = "gpt-4.1-mini"
+      version  = "2025-04-14"
+      sku_name = "Standard"
+      capacity = 30
+    },
+  ]
+}
