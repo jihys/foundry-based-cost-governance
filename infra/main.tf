@@ -195,13 +195,49 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
         name = "header"
       },
       # ---------------------------------------------------------------------
+      # Time Range Parameter
+      # ---------------------------------------------------------------------
+      {
+        type = 9
+        content = {
+          version = "KqlParameterItem/1.0"
+          parameters = [
+            {
+              id         = "time_range"
+              version    = "KqlParameterItem/1.0"
+              name       = "TimeRange"
+              label      = "시간 범위"
+              type       = 4
+              isRequired = true
+              value = {
+                durationMs = 86400000
+              }
+              typeSettings = {
+                selectableValues = [
+                  { durationMs = 3600000, displayText = "Last 1 hour" },
+                  { durationMs = 14400000, displayText = "Last 4 hours" },
+                  { durationMs = 43200000, displayText = "Last 12 hours" },
+                  { durationMs = 86400000, displayText = "Last 24 hours", isInitialTime = true },
+                  { durationMs = 172800000, displayText = "Last 2 days" },
+                  { durationMs = 604800000, displayText = "Last 7 days" },
+                  { durationMs = 2592000000, displayText = "Last 30 days" }
+                ]
+                allowCustom = true
+              }
+            }
+          ]
+          style = "pills"
+        }
+        name = "time-range-parameter"
+      },
+      # ---------------------------------------------------------------------
       # Panel 1: 일별 토큰 사용량 (bar chart)
       # ---------------------------------------------------------------------
       {
         type = 3
         content = {
-          version                 = "KqlItem/1.0"
-          query                   = <<-KQL
+          version                  = "KqlItem/1.0"
+          query                    = <<-KQL
             let tokens = AzureMetrics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where MetricName in ("InputTokens", "OutputTokens")
@@ -213,12 +249,12 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
             tokens
             | order by TimeGenerated desc
           KQL
-          size                    = 0
-          timeContext             = { durationMs = 2592000000 }
-          queryType               = 0
-          resourceType            = "microsoft.operationalinsights/workspaces"
-          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
-          visualization           = "barchart"
+          size                     = 0
+          timeContextFromParameter = "TimeRange"
+          queryType                = 0
+          resourceType             = "microsoft.operationalinsights/workspaces"
+          crossComponentResources  = [azurerm_log_analytics_workspace.main.id]
+          visualization            = "barchart"
           chartSettings = {
             xAxis = "TimeGenerated"
             yAxis = ["InputTokens", "OutputTokens"]
@@ -232,8 +268,8 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
       {
         type = 3
         content = {
-          version                 = "KqlItem/1.0"
-          query                   = <<-KQL
+          version                  = "KqlItem/1.0"
+          query                    = <<-KQL
             let model_reqs = AzureDiagnostics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
@@ -255,12 +291,12 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
             | project model_name, Requests, InputTokens, OutputTokens, TotalTokens, AvgDurationMs
             | order by TotalTokens desc
           KQL
-          size                    = 0
-          timeContext             = { durationMs = 2592000000 }
-          queryType               = 0
-          resourceType            = "microsoft.operationalinsights/workspaces"
-          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
-          visualization           = "table"
+          size                     = 0
+          timeContextFromParameter = "TimeRange"
+          queryType                = 0
+          resourceType             = "microsoft.operationalinsights/workspaces"
+          crossComponentResources  = [azurerm_log_analytics_workspace.main.id]
+          visualization            = "table"
         }
         name = "model-usage-summary"
       },
@@ -270,8 +306,8 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
       {
         type = 3
         content = {
-          version                 = "KqlItem/1.0"
-          query                   = <<-KQL
+          version                  = "KqlItem/1.0"
+          query                    = <<-KQL
             let model_pricing = datatable(model_name: string, input_per_1k: real, output_per_1k: real) [
                 "gpt-4o",             0.0025,  0.01,
                 "gpt-4.1-mini",       0.0004,  0.0016,
@@ -304,12 +340,12 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
             | project TimeGenerated, model_name, EstCostUSD
             | order by TimeGenerated desc
           KQL
-          size                    = 0
-          timeContext             = { durationMs = 2592000000 }
-          queryType               = 0
-          resourceType            = "microsoft.operationalinsights/workspaces"
-          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
-          visualization           = "linechart"
+          size                     = 0
+          timeContextFromParameter = "TimeRange"
+          queryType                = 0
+          resourceType             = "microsoft.operationalinsights/workspaces"
+          crossComponentResources  = [azurerm_log_analytics_workspace.main.id]
+          visualization            = "linechart"
           chartSettings = {
             xAxis = "TimeGenerated"
             yAxis = ["EstCostUSD"]
@@ -324,8 +360,8 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
       {
         type = 3
         content = {
-          version                 = "KqlItem/1.0"
-          query                   = <<-KQL
+          version                  = "KqlItem/1.0"
+          query                    = <<-KQL
             AzureDiagnostics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
@@ -333,12 +369,12 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
             | summarize RequestCount = count() by bin(TimeGenerated, 1d), model_name
             | order by TimeGenerated desc
           KQL
-          size                    = 0
-          timeContext             = { durationMs = 2592000000 }
-          queryType               = 0
-          resourceType            = "microsoft.operationalinsights/workspaces"
-          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
-          visualization           = "barchart"
+          size                     = 0
+          timeContextFromParameter = "TimeRange"
+          queryType                = 0
+          resourceType             = "microsoft.operationalinsights/workspaces"
+          crossComponentResources  = [azurerm_log_analytics_workspace.main.id]
+          visualization            = "barchart"
           chartSettings = {
             xAxis = "TimeGenerated"
             yAxis = ["RequestCount"]
@@ -353,8 +389,8 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
       {
         type = 3
         content = {
-          version                 = "KqlItem/1.0"
-          query                   = <<-KQL
+          version                  = "KqlItem/1.0"
+          query                    = <<-KQL
             AzureDiagnostics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
@@ -365,12 +401,12 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
               by bin(TimeGenerated, 1d), model_name
             | order by TimeGenerated desc
           KQL
-          size                    = 0
-          timeContext             = { durationMs = 2592000000 }
-          queryType               = 0
-          resourceType            = "microsoft.operationalinsights/workspaces"
-          crossComponentResources = [azurerm_log_analytics_workspace.main.id]
-          visualization           = "linechart"
+          size                     = 0
+          timeContextFromParameter = "TimeRange"
+          queryType                = 0
+          resourceType             = "microsoft.operationalinsights/workspaces"
+          crossComponentResources  = [azurerm_log_analytics_workspace.main.id]
+          visualization            = "linechart"
           chartSettings = {
             xAxis = "TimeGenerated"
             yAxis = ["AvgDurationMs"]
