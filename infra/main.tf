@@ -242,11 +242,21 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where MetricName in ("InputTokens", "OutputTokens")
             | summarize
-                InputTokens = sumif(Total, MetricName == "InputTokens"),
-                OutputTokens = sumif(Total, MetricName == "OutputTokens"),
-                TotalTokens = sumif(Total, MetricName == "InputTokens") + sumif(Total, MetricName == "OutputTokens")
+                MetricsInput = sumif(Total, MetricName == "InputTokens"),
+                MetricsOutput = sumif(Total, MetricName == "OutputTokens")
               by bin(TimeGenerated, 1d);
-            tokens
+            let bytes = AzureDiagnostics
+            | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
+            | where Category == "RequestResponse"
+            | extend req_bytes = todouble(parse_json(properties_s).requestLength)
+            | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
+            | summarize TotalReqBytes = sum(req_bytes), TotalRespBytes = sum(resp_bytes) by bin(TimeGenerated, 1d);
+            bytes
+            | join kind=leftouter tokens on TimeGenerated
+            | extend InputTokens = iff(coalesce(MetricsInput, 0.0) > 0, round(MetricsInput), round(TotalReqBytes / 8.0))
+            | extend OutputTokens = iff(coalesce(MetricsOutput, 0.0) > 0, round(MetricsOutput), round(TotalRespBytes / 18.0))
+            | extend TotalTokens = InputTokens + OutputTokens
+            | project TimeGenerated, InputTokens, OutputTokens, TotalTokens
             | order by TimeGenerated desc
           KQL
           size                     = 0
@@ -274,19 +284,23 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend model_name = tostring(parse_json(properties_s).modelName)
+            | extend req_bytes = todouble(parse_json(properties_s).requestLength)
             | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
             | summarize
                 Requests = count(),
                 AvgDurationMs = round(avg(DurationMs), 1),
+                TotalReqBytes = sum(req_bytes),
                 TotalRespBytes = sum(resp_bytes)
               by model_name;
+            let total_req = toscalar(model_reqs | summarize sum(TotalReqBytes));
             let total_resp = toscalar(model_reqs | summarize sum(TotalRespBytes));
             let total_input = toscalar(AzureMetrics | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES" | where MetricName == "InputTokens" | summarize sum(Total));
             let total_output = toscalar(AzureMetrics | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES" | where MetricName == "OutputTokens" | summarize sum(Total));
             model_reqs
-            | extend Weight = iff(total_resp > 0, TotalRespBytes / total_resp, 0.0)
-            | extend InputTokens = round(total_input * Weight)
-            | extend OutputTokens = round(total_output * Weight)
+            | extend ReqWeight = iff(total_req > 0, TotalReqBytes / total_req, 0.0)
+            | extend RespWeight = iff(total_resp > 0, TotalRespBytes / total_resp, 0.0)
+            | extend InputTokens = iff(coalesce(total_input, 0.0) > 0, round(total_input * ReqWeight), round(TotalReqBytes / 8.0))
+            | extend OutputTokens = iff(coalesce(total_output, 0.0) > 0, round(total_output * RespWeight), round(TotalRespBytes / 18.0))
             | extend TotalTokens = InputTokens + OutputTokens
             | project model_name, Requests, InputTokens, OutputTokens, TotalTokens, AvgDurationMs
             | order by TotalTokens desc
@@ -326,15 +340,17 @@ resource "azurerm_application_insights_workbook" "cost_dashboard" {
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend model_name = tostring(parse_json(properties_s).modelName)
+            | extend req_bytes = todouble(parse_json(properties_s).requestLength)
             | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
-            | summarize TotalRespBytes = sum(resp_bytes), Requests = count() by bin(TimeGenerated, 1d), model_name;
-            let daily_total_resp = hourly_models | summarize DayTotalResp = sum(TotalRespBytes) by TimeGenerated;
+            | summarize TotalRespBytes = sum(resp_bytes), TotalReqBytes = sum(req_bytes), Requests = count() by bin(TimeGenerated, 1d), model_name;
+            let daily_total_resp = hourly_models | summarize DayTotalResp = sum(TotalRespBytes), DayTotalReq = sum(TotalReqBytes) by TimeGenerated;
             hourly_models
             | join kind=inner daily_total_resp on TimeGenerated
+            | join kind=leftouter hourly_tokens on TimeGenerated
             | extend Weight = iff(DayTotalResp > 0, TotalRespBytes / DayTotalResp, 0.0)
-            | join kind=inner hourly_tokens on TimeGenerated
-            | extend ModelInputTokens = InputTokens * Weight
-            | extend ModelOutputTokens = OutputTokens * Weight
+            | extend ReqWeight = iff(DayTotalReq > 0, TotalReqBytes / DayTotalReq, 0.0)
+            | extend ModelInputTokens = iff(coalesce(InputTokens, 0.0) > 0, InputTokens * ReqWeight, TotalReqBytes / 8.0)
+            | extend ModelOutputTokens = iff(coalesce(OutputTokens, 0.0) > 0, OutputTokens * Weight, TotalRespBytes / 18.0)
             | lookup kind=leftouter model_pricing on model_name
             | extend EstCostUSD = round(ModelInputTokens / 1000.0 * coalesce(input_per_1k, 0.001) + ModelOutputTokens / 1000.0 * coalesce(output_per_1k, 0.002), 4)
             | project TimeGenerated, model_name, EstCostUSD

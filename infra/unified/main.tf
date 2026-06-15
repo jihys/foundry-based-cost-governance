@@ -114,14 +114,18 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
                 InputTokens = sumif(Total, MetricName == "InputTokens"),
                 OutputTokens = sumif(Total, MetricName == "OutputTokens")
               by bin(TimeGenerated, 1d), team_name;
-            let team_reqs = all_logs
+            let team_bytes = all_logs
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
-            | summarize RequestCount = count() by bin(TimeGenerated, 1d), team_name;
-            team_reqs
+            | extend req_bytes = todouble(parse_json(properties_s).requestLength)
+            | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
+            | summarize RequestCount = count(), TotalReqBytes = sum(req_bytes), TotalRespBytes = sum(resp_bytes) by bin(TimeGenerated, 1d), team_name;
+            team_bytes
             | join kind=leftouter team_tokens on TimeGenerated, team_name
-            | project TimeGenerated, team_name, RequestCount, InputTokens = coalesce(InputTokens, 0.0), OutputTokens = coalesce(OutputTokens, 0.0)
+            | extend InputTokens = iff(coalesce(InputTokens, 0.0) > 0, round(InputTokens), round(TotalReqBytes / 8.0))
+            | extend OutputTokens = iff(coalesce(OutputTokens, 0.0) > 0, round(OutputTokens), round(TotalRespBytes / 18.0))
+            | project TimeGenerated, team_name, RequestCount, InputTokens, OutputTokens
             | order by TimeGenerated desc
           KQL
           size                     = 0
@@ -155,8 +159,9 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             | where Category == "RequestResponse"
             | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
+            | extend req_bytes = todouble(parse_json(properties_s).requestLength)
             | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
-            | summarize Requests = count(), TotalRespBytes = sum(resp_bytes), AvgDurationMs = round(avg(DurationMs), 1) by team_name, model_name;
+            | summarize Requests = count(), TotalReqBytes = sum(req_bytes), TotalRespBytes = sum(resp_bytes), AvgDurationMs = round(avg(DurationMs), 1) by team_name, model_name;
             let team_total_resp = model_reqs | summarize TeamTotalResp = sum(TotalRespBytes) by team_name;
             let team_tokens = all_metrics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
@@ -170,8 +175,8 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             | join kind=inner team_total_resp on team_name
             | join kind=leftouter team_tokens on team_name
             | extend Weight = iff(TeamTotalResp > 0, TotalRespBytes / TeamTotalResp, 0.0)
-            | extend InputTokens = round(coalesce(TeamInputTokens, 0.0) * Weight)
-            | extend OutputTokens = round(coalesce(TeamOutputTokens, 0.0) * Weight)
+            | extend InputTokens = iff(coalesce(TeamInputTokens, 0.0) > 0, round(TeamInputTokens * Weight), round(TotalReqBytes / 8.0))
+            | extend OutputTokens = iff(coalesce(TeamOutputTokens, 0.0) > 0, round(TeamOutputTokens * Weight), round(TotalRespBytes / 18.0))
             | extend TotalTokens = InputTokens + OutputTokens
             | project team_name, model_name, Requests, InputTokens, OutputTokens, TotalTokens, AvgDurationMs
             | order by team_name asc, TotalTokens desc
@@ -217,15 +222,17 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             | where Category == "RequestResponse"
             | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | extend model_name = tostring(parse_json(properties_s).modelName)
+            | extend req_bytes = todouble(parse_json(properties_s).requestLength)
             | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
-            | summarize TotalRespBytes = sum(resp_bytes) by bin(TimeGenerated, 1d), team_name, model_name;
-            let day_team_total = model_dist | summarize DayTeamTotal = sum(TotalRespBytes) by TimeGenerated, team_name;
+            | summarize TotalRespBytes = sum(resp_bytes), TotalReqBytes = sum(req_bytes), Requests = count() by bin(TimeGenerated, 1d), team_name, model_name;
+            let day_team_total = model_dist | summarize DayTeamTotal = sum(TotalRespBytes), DayTeamReqTotal = sum(TotalReqBytes) by TimeGenerated, team_name;
             model_dist
             | join kind=inner day_team_total on TimeGenerated, team_name
             | join kind=leftouter team_tokens on TimeGenerated, team_name
             | extend Weight = iff(DayTeamTotal > 0, TotalRespBytes / DayTeamTotal, 0.0)
-            | extend ModelInput = coalesce(TeamInputTokens, 0.0) * Weight
-            | extend ModelOutput = coalesce(TeamOutputTokens, 0.0) * Weight
+            | extend ReqWeight = iff(DayTeamReqTotal > 0, TotalReqBytes / DayTeamReqTotal, 0.0)
+            | extend ModelInput = iff(coalesce(TeamInputTokens, 0.0) > 0, TeamInputTokens * ReqWeight, TotalReqBytes / 8.0)
+            | extend ModelOutput = iff(coalesce(TeamOutputTokens, 0.0) > 0, TeamOutputTokens * Weight, TotalRespBytes / 18.0)
             | lookup kind=leftouter model_pricing on model_name
             | extend EstCostUSD = round(ModelInput / 1000.0 * coalesce(input_per_1k, 0.001) + ModelOutput / 1000.0 * coalesce(output_per_1k, 0.002), 4)
             | summarize DailyCostUSD = round(sum(EstCostUSD), 4) by bin(TimeGenerated, 1d), team_name
@@ -296,6 +303,13 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
         content = {
           version                  = "KqlItem/1.0"
           query                    = <<-KQL
+            let model_pricing = datatable(model_name: string, input_per_1k: real, output_per_1k: real) [
+                "gpt-4o",             0.0025,  0.01,
+                "gpt-4.1-mini",       0.0004,  0.0016,
+                "gpt-5.4-mini",       0.0004,  0.0016,
+                "o3-mini",            0.0011,  0.0044,
+                "text-embedding-3-large", 0.00013, 0.0
+            ];
             let all_metrics = union
               ${local.workspace_metrics_union};
             let all_logs = union
@@ -304,23 +318,37 @@ resource "azurerm_application_insights_workbook" "unified_dashboard" {
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where Category == "RequestResponse"
             | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
-            | summarize TotalRequests = count() by team_name;
+            | extend model_name = tostring(parse_json(properties_s).modelName)
+            | extend req_bytes = todouble(parse_json(properties_s).requestLength)
+            | extend resp_bytes = todouble(parse_json(properties_s).responseLength)
+            | summarize TotalRequests = count(), TotalReqBytes = sum(req_bytes), TotalRespBytes = sum(resp_bytes) by team_name, model_name;
+            let team_total = team_reqs | summarize TeamTotalResp = sum(TotalRespBytes), TeamTotalReq = sum(TotalReqBytes) by team_name;
             let team_tokens = all_metrics
             | where ResourceProvider == "MICROSOFT.COGNITIVESERVICES"
             | where MetricName in ("InputTokens", "OutputTokens")
             | extend team_name = extract("resourcegroups/rg-(.*)-ai-foundry", 1, _ResourceId)
             | summarize
-                InputTokens = round(sumif(Total, MetricName == "InputTokens")),
-                OutputTokens = round(sumif(Total, MetricName == "OutputTokens")),
-                TotalTokens = round(sumif(Total, MetricName == "InputTokens") + sumif(Total, MetricName == "OutputTokens"))
+                MetricsInputTokens = round(sumif(Total, MetricName == "InputTokens")),
+                MetricsOutputTokens = round(sumif(Total, MetricName == "OutputTokens"))
               by team_name;
-            team_reqs
+            let team_summary = team_reqs
+            | join kind=inner team_total on team_name
             | join kind=leftouter team_tokens on team_name
-            | extend InputTokens = coalesce(InputTokens, 0.0)
-            | extend OutputTokens = coalesce(OutputTokens, 0.0)
-            | extend TotalTokens = coalesce(TotalTokens, 0.0)
-            | project team_name, TotalRequests, InputTokens, OutputTokens, TotalTokens
-            | order by TotalRequests desc
+            | extend Weight = iff(TeamTotalResp > 0, TotalRespBytes / TeamTotalResp, 0.0)
+            | extend ReqWeight = iff(TeamTotalReq > 0, TotalReqBytes / TeamTotalReq, 0.0)
+            | extend ModelInput = iff(coalesce(MetricsInputTokens, 0.0) > 0, MetricsInputTokens * ReqWeight, TotalReqBytes / 8.0)
+            | extend ModelOutput = iff(coalesce(MetricsOutputTokens, 0.0) > 0, MetricsOutputTokens * Weight, TotalRespBytes / 18.0)
+            | lookup kind=leftouter model_pricing on model_name
+            | extend cost = ModelInput / 1000.0 * coalesce(input_per_1k, 0.001) + ModelOutput / 1000.0 * coalesce(output_per_1k, 0.002);
+            team_summary
+            | summarize
+                TotalRequests = sum(TotalRequests),
+                InputTokens = round(sum(ModelInput)),
+                OutputTokens = round(sum(ModelOutput)),
+                TotalTokens = round(sum(ModelInput) + sum(ModelOutput)),
+                EstCostUSD = round(sum(cost), 4)
+              by team_name
+            | order by TotalTokens desc
           KQL
           size                     = 0
           timeContextFromParameter = "TimeRange"
